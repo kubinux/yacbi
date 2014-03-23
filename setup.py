@@ -9,6 +9,6 @@ setup(name='yacbi',
       description='Yet Another Clang-Based Indexer',
       long_description=long_description,
       author='Jakub Lewandowski',
-      author_email='kuba@linux.com',
+      author_email='jakub.lewandowski@gmail.com',
       url='http://github.com/kubus-puchatek/yacbi',
       )
