@@ -47,7 +47,7 @@ def main():
         root,
         config.extra_args,
         config.banned_args)
-    with yacbi.connect_to_db('index.db') as conn:
+    with yacbi.connect_to_db(root) as conn:
         indexer = yacbi.Indexer(conn, compilation_db, root)
         indexer.run()
         conn.commit()

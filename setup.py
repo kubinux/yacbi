@@ -11,5 +11,5 @@ setup(name='yacbi',
       author='Jakub Lewandowski',
       author_email='jakub.lewandowski@gmail.com',
       url='http://github.com/kubus-puchatek/yacbi',
-      scripts=['scripts/yacbi-index.py']
+      scripts=['scripts/yacbi-index.py'],
       )

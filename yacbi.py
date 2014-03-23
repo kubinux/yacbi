@@ -34,6 +34,7 @@ __all__ = [
     'CompileCommand',
     'Indexer',
     'connect_to_db',
+    'query_compile_args',
     ]
 
 
@@ -146,7 +147,8 @@ class CompilationDatabase(object):
         return CompileCommand(filename, args, cc.directory)
 
 
-def connect_to_db(dbfile):
+def connect_to_db(root_dir):
+    dbfile = os.path.join(root_dir, '.yacbi.db')
     conn = sqlite3.connect(
         dbfile,
         detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
@@ -200,6 +202,20 @@ def connect_to_db(dbfile):
     """)
     conn.commit()
     return conn
+
+
+def query_compile_args(conn, filename):
+    cur = conn.cursor()
+    cur.execute("""SELECT id FROM files WHERE path = ?""", (filename,))
+    file_id = cur.fetchone()
+    if file_id is None:
+        return None
+    cur.execute("""
+                SELECT arg FROM compile_args
+                WHERE file_id = ?
+                ORDER BY id""",
+                file_id)
+    return [tup[0] for tup in cur.fetchall()]
 
 
 class Indexer(object):
@@ -465,4 +481,3 @@ class Indexer(object):
         for inc in cmd.args.iincludes:
             idx.includes.add(inc)
         return idx
-
