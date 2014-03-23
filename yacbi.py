@@ -1,5 +1,5 @@
 """
-Yacbi - Yet Another Clang-Based Indexer.
+yacbi - Yet Another Clang-Based Indexer.
 
 Copyright (C) 2014 Jakub Lewandowski <jakub.lewandowski@gmail.com>
 
@@ -26,6 +26,15 @@ import os
 import shutil
 import sqlite3
 import tempfile
+
+
+__all__ = [
+    'CompilationDatabase',
+    'CompileArgs',
+    'CompileCommand',
+    'Indexer',
+    'connect_to_db',
+    ]
 
 
 def _make_absolute_path(cwd, path):
@@ -457,34 +466,3 @@ class Indexer(object):
             idx.includes.add(inc)
         return idx
 
-
-Config = collections.namedtuple(
-    'Config', ['extra_args', 'banned_args', 'overrides'])
-
-
-def read_config():
-    config_filename = '.yacbi.json'
-    js = {}
-    if os.path.isfile(config_filename):
-        with open(config_filename, 'r') as config_fd:
-            js = json.load(config_fd)
-    return Config(js.get('extra_args', []),
-                  js.get('banned_args', []),
-                  js.get('overrides', []))
-
-
-def main():
-    config = read_config()
-    root = os.getcwd()
-    compilation_db = CompilationDatabase(
-        root,
-        config.extra_args,
-        config.banned_args)
-    with connect_to_db('index.db') as conn:
-        indexer = Indexer(conn, compilation_db, root)
-        indexer.run()
-        conn.commit()
-
-
-if __name__ == '__main__':
-    main()
