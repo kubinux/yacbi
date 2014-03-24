@@ -405,17 +405,17 @@ class Indexer(object):
                 symbol_id = cur.lastrowid
             else:
                 symbol_id = symbol_id[0]
-                cur.executemany(
-                    """
-                    INSERT INTO refs (
-                      symbol_id,
-                      file_id,
-                      line,
-                      "column",
-                      kind)
-                    VALUES (?, ?, ?, ?, ?)""",
-                    [(symbol_id, idx.file_id, ref.line, ref.column, ref.kind)
-                     for ref in refs])
+            cur.executemany(
+                """
+                INSERT INTO refs (
+                  symbol_id,
+                  file_id,
+                  line,
+                  "column",
+                  kind)
+                VALUES (?, ?, ?, ?, ?)""",
+                [(symbol_id, idx.file_id, ref.line, ref.column, ref.kind)
+                 for ref in refs])
 
     def _save_includes(self, idx):
         cur = self._conn.cursor()
