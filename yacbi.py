@@ -38,7 +38,7 @@ __all__ = [
     ]
 
 
-logger = logging.getLogger("yacbi")
+logger = logging.getLogger('yacbi')
 logger.addHandler(logging.NullHandler())
 
 
