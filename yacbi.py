@@ -481,9 +481,12 @@ class Indexer(object):
                         new_commands.append(new_cmd)
             commands = new_commands
         for idx in indexed_files:
-            self._save_file_index(idx)
+            file_id = self._save_file(idx.filename, idx.cwd, idx.is_included)
+            idx.file_id = file_id
+            self._save_args(file_id, idx.args.all_args)
+            self._save_refs(file_id, idx.references_by_usr)
         for idx in indexed_files:
-            self._save_includes(idx)
+            self._save_includes(idx.file_id, idx.includes)
 
     @staticmethod
     def _get_mtime(path):
@@ -515,10 +518,9 @@ class Indexer(object):
                     update_commands.append(cmd)
         return update_commands
 
-    def _save_file_index(self, idx):
+    def _save_file(self, path, cwd, is_included):
         cur = self._conn.cursor()
-        cur.execute("SELECT id FROM files WHERE path = ? LIMIT 1",
-                    (idx.filename,))
+        cur.execute("SELECT id FROM files WHERE path = ? LIMIT 1", (path,))
         file_id = cur.fetchone()
         if file_id is None:
             cur.execute("""
@@ -528,7 +530,7 @@ class Indexer(object):
                           last_update,
                           is_included)
                         VALUES (?, ?, ?, ?)""",
-                        (idx.filename, idx.cwd, self._now, idx.is_included))
+                        (path, cwd, self._now, is_included))
             file_id = cur.lastrowid
         else:
             file_id = file_id[0]
@@ -538,21 +540,27 @@ class Indexer(object):
                           last_update = ?,
                           is_included = ?
                         WHERE id = ?""",
-                        (idx.cwd, self._now, idx.is_included, file_id))
-        idx.file_id = file_id
+                        (cwd, self._now, is_included, file_id))
+        return file_id
+
+    def _save_args(self, file_id, all_args):
+        cur = self._conn.cursor()
         cur.execute("""
                     DELETE FROM compile_args
                     WHERE file_id = ?""",
-                    (idx.file_id,))
-        if idx.args:
+                    (file_id,))
+        if all_args:
             cur.executemany("""
                             INSERT INTO compile_args (
                               file_id,
                               arg)
                             VALUES (?, ?)""",
-                            [(idx.file_id, arg) for arg in idx.args.all_args])
-        cur.execute("DELETE FROM refs WHERE file_id = ?", (idx.file_id,))
-        for usr, refs in idx.references_by_usr.iteritems():
+                            [(file_id, arg) for arg in all_args])
+
+    def _save_refs(self, file_id, refs_by_usr):
+        cur = self._conn.cursor()
+        cur.execute("DELETE FROM refs WHERE file_id = ?", (file_id,))
+        for usr, refs in refs_by_usr.iteritems():
             cur.execute("""
                         SELECT id FROM symbols
                         WHERE usr = ? LIMIT 1""",
@@ -573,26 +581,22 @@ class Indexer(object):
                   kind,
                   is_definition)
                 VALUES (?, ?, ?, ?, ?, ?)""",
-                self._make_ref_values(symbol_id, idx.file_id, refs))
+                [(symbol_id, file_id, l.line, l.column, r.kind, r.is_definition)
+                 for l, r in refs.iteritems()])
 
-    @staticmethod
-    def _make_ref_values(symbol_id, file_id, refs):
-        return [(symbol_id, file_id, l.line, l.column, r.kind, r.is_definition)
-                for l, r in refs.iteritems()]
-
-    def _save_includes(self, idx):
+    def _save_includes(self, file_id, includes):
         cur = self._conn.cursor()
         cur.execute("""
                     DELETE FROM includes WHERE including_file_id = ?""",
-                    (idx.file_id,))
+                    (file_id,))
         inc_values = []
-        for inc in idx.includes:
+        for inc in includes:
             cur.execute(
                 """
                 SELECT id FROM files WHERE path = ? LIMIT 1""",
                 (inc,))
             inc_id = cur.fetchone()
-            inc_values.append((idx.file_id, inc_id[0]))
+            inc_values.append((file_id, inc_id[0]))
         if inc_values:
             cur.executemany("""
                             INSERT INTO includes (
@@ -611,21 +615,21 @@ class Indexer(object):
         return direct_includes
 
     @staticmethod
-    def _find_references(cursor, idx):
-        if not cursor.location.file:
-            for child_cursor in cursor.get_children():
+    def _find_references(clang_cursor, idx):
+        if not clang_cursor.location.file:
+            for child_cursor in clang_cursor.get_children():
                 Indexer._find_references(child_cursor, idx)
-        elif cursor.location.file.name == idx.filename:
-            if cursor.referenced:
-                usr = cursor.referenced.get_usr()
+        elif clang_cursor.location.file.name == idx.filename:
+            if clang_cursor.referenced:
+                usr = clang_cursor.referenced.get_usr()
                 if usr and usr != "c:":
                     idx.add_reference(
                         usr,
-                        Indexer._RefLocation(cursor.location.line,
-                                             cursor.location.column),
-                        Indexer._Ref(cursor.is_definition(),
-                                     cursor.kind.from_param()))
-            for child_cursor in cursor.get_children():
+                        Indexer._RefLocation(clang_cursor.location.line,
+                                             clang_cursor.location.column),
+                        Indexer._Ref(clang_cursor.is_definition(),
+                                     clang_cursor.kind.from_param()))
+            for child_cursor in clang_cursor.get_children():
                 Indexer._find_references(child_cursor, idx)
 
     def _index_file(self, cmd):
