@@ -19,6 +19,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 import collections
 import itertools
 import json
+import logging
 import os
 import sqlite3
 
@@ -27,17 +28,18 @@ import datetime
 
 
 __all__ = [
-    'CompilationDatabase',
-    'CompileArgs',
-    'CompileCommand',
+    'logger',
     'Reference',
-    'Indexer',
-    'connect_to_db',
     'get_root_for_path',
     'query_compile_args',
     'query_definitions',
     'query_references',
+    'create_or_update',
     ]
+
+
+logger = logging.getLogger("yacbi")
+logger.addHandler(logging.NullHandler())
 
 
 def _make_absolute_path(cwd, path):
@@ -47,12 +49,12 @@ def _make_absolute_path(cwd, path):
         return os.path.normpath(os.path.join(cwd, path))
 
 
-CompileArgs = collections.namedtuple(
-    'CompileArgs', ['all_args', 'iincludes', 'has_x'])
+_CompileArgs = collections.namedtuple(
+    '_CompileArgs', ['all_args', 'iincludes', 'has_x'])
 
 
-CompileCommand = collections.namedtuple(
-    'CompileCommand', ['filename', 'args', 'current_dir', 'is_included'])
+_CompileCommand = collections.namedtuple(
+    '_CompileCommand', ['filename', 'args', 'current_dir', 'is_included'])
 
 
 Reference = collections.namedtuple(
@@ -169,7 +171,7 @@ def _make_compile_args(cwd, args, extra_args, banned_args):
             else:
                 _handle_one_part_include_arg(arg, all_args, cwd, iincludes)
         arg = next(itr, None)
-    return CompileArgs(all_args, iincludes, has_x)
+    return _CompileArgs(all_args, iincludes, has_x)
 
 
 def _is_cpp_source(path):
@@ -177,7 +179,7 @@ def _is_cpp_source(path):
     return ext in _CPP_EXTENSIONS
 
 
-class CompilationDatabase(object):
+class _CompilationDatabase(object):
     def __init__(self, root, extra_args, banned_args):
         self._extra_args = extra_args
         self._banned_args = banned_args
@@ -200,7 +202,7 @@ class CompilationDatabase(object):
                                   ccmd.arguments,
                                   self._extra_args,
                                   self._banned_args)
-        return CompileCommand(filename, args, ccmd.directory, False)
+        return _CompileCommand(filename, args, ccmd.directory, False)
 
 
 def get_root_for_path(path):
@@ -217,7 +219,7 @@ def get_root_for_path(path):
         current_dir = new_dir
 
 
-def connect_to_db(root_dir):
+def _connect_to_db(root_dir):
     dbfile = os.path.join(root_dir, '.yacbi.db')
     conn = sqlite3.connect(
         dbfile,
@@ -276,7 +278,7 @@ def connect_to_db(root_dir):
 
 
 def query_compile_args(root, filename):
-    with connect_to_db(root) as conn:
+    with _connect_to_db(root) as conn:
         cur = conn.cursor()
         cur.execute("""SELECT id FROM files WHERE path = ?""", (filename,))
         file_id = cur.fetchone()
@@ -291,7 +293,7 @@ def query_compile_args(root, filename):
 
 
 def query_definitions(root, usr):
-    with connect_to_db(root) as conn:
+    with _connect_to_db(root) as conn:
         cur = conn.cursor()
         cur.execute("SELECT id FROM symbols WHERE usr = ? LIMIT 1", (usr,))
         symbol_id = cur.fetchone()
@@ -324,7 +326,7 @@ def query_definitions(root, usr):
 
 
 def query_references(root, usr):
-    with connect_to_db(root) as conn:
+    with _connect_to_db(root) as conn:
         cur = conn.cursor()
         cur.execute("SELECT id FROM symbols WHERE usr = ? LIMIT 1", (usr,))
         symbol_id = cur.fetchone()
@@ -357,17 +359,47 @@ def query_references(root, usr):
                 for t in cur.fetchall()]
 
 
-class Indexer(object):
-    _RefLocation = collections.namedtuple('_RefLocation', ['line', 'column'])
+_Config = collections.namedtuple(
+    '_Config', ['extra_args', 'banned_args', 'overrides'])
 
-    _Ref = collections.namedtuple('_Ref', ['is_definition', 'kind'])
 
-    class _IndexResult(object):
+def _read_config(root):
+    config_path = os.path.join(root, '.yacbi.json')
+    js = {}
+    if os.path.isfile(config_path):
+        with open(config_path, 'r') as config_fd:
+            js = json.load(config_fd)
+    return _Config(js.get('extra_args', []),
+                   js.get('banned_args', []),
+                   js.get('overrides', []))
+
+
+def create_or_update(root):
+    config = _read_config(root)
+    compilation_db = _CompilationDatabase(
+        root,
+        config.extra_args,
+        config.banned_args)
+    with _connect_to_db(root) as conn:
+        indexer = _Indexer(conn, compilation_db, root)
+        indexer.run()
+        conn.commit()
+
+
+class _Indexer(object):
+    RefLocation = collections.namedtuple('RefLocation', ['line', 'column'])
+
+    Ref = collections.namedtuple('Ref', ['is_definition', 'kind'])
+
+    Diag = collections.namedtuple(
+        'Diag', ['spelling', 'filename', 'line', 'column', 'disable_option'])
+
+    class IndexResult(object):
         def __init__(self, cmd):
             self.filename = cmd.filename
             self.cwd = cmd.current_dir
             self.args = cmd.args
-            self.diagnostics = []
+            self.errors = []
             self.includes = []
             self.references_by_usr = {}
             self.file_id = None
@@ -388,6 +420,7 @@ class Indexer(object):
         self._comp_db = comp_db
         self._root = project_root
         self._now = datetime.datetime.now()
+        self._errors_left = 0
 
     def run(self):
         self._now = datetime.datetime.now()
@@ -458,9 +491,15 @@ class Indexer(object):
             new_commands = []
             for cmd in commands:
                 idx = self._index_file(cmd)
+                if logger.isEnabledFor(logging.ERROR):
+                    for err in idx.errors:
+                        logger.error("%s:%d:%d: %s",
+                                     err.filename,
+                                     err.line,
+                                     err.column,
+                                     err.spelling)
                 indexed_files.append(idx)
                 indexed_so_far.add(idx.filename)
-                print idx.filename, len(idx.diagnostics)
                 for inc in idx.includes:
                     if inc in indexed_so_far:
                         continue
@@ -472,12 +511,12 @@ class Indexer(object):
                                 and _is_cpp_source(idx.filename)):
                             all_args = ['-x', 'c++']
                             all_args.extend(idx.args.all_args)
-                            args = CompileArgs(all_args,
-                                               idx.args.iincludes,
-                                               True)
+                            args = _CompileArgs(all_args,
+                                                idx.args.iincludes,
+                                                True)
                         else:
                             args = idx.args
-                        new_cmd = CompileCommand(inc, args, idx.cwd, True)
+                        new_cmd = _CompileCommand(inc, args, idx.cwd, True)
                         new_commands.append(new_cmd)
             commands = new_commands
         for idx in indexed_files:
@@ -511,10 +550,10 @@ class Indexer(object):
                                 (tup[0],))
                     args = [arg[0] for arg in cur.fetchall()]
                     cwd = tup[3]
-                    cmd = CompileCommand(tup[1],
-                                         _make_compile_args(cwd, args, [], []),
-                                         cwd,
-                                         tup[4])
+                    cmd = _CompileCommand(tup[1],
+                                          _make_compile_args(cwd, args, [], []),
+                                          cwd,
+                                          tup[4])
                     update_commands.append(cmd)
         return update_commands
 
@@ -618,19 +657,19 @@ class Indexer(object):
     def _find_references(clang_cursor, idx):
         if not clang_cursor.location.file:
             for child_cursor in clang_cursor.get_children():
-                Indexer._find_references(child_cursor, idx)
+                _Indexer._find_references(child_cursor, idx)
         elif clang_cursor.location.file.name == idx.filename:
             if clang_cursor.referenced:
                 usr = clang_cursor.referenced.get_usr()
                 if usr and usr != "c:":
                     idx.add_reference(
                         usr,
-                        Indexer._RefLocation(clang_cursor.location.line,
+                        _Indexer.RefLocation(clang_cursor.location.line,
                                              clang_cursor.location.column),
-                        Indexer._Ref(clang_cursor.is_definition(),
+                        _Indexer.Ref(clang_cursor.is_definition(),
                                      clang_cursor.kind.from_param()))
             for child_cursor in clang_cursor.get_children():
-                Indexer._find_references(child_cursor, idx)
+                _Indexer._find_references(child_cursor, idx)
 
     def _index_file(self, cmd):
         clang_idx = clang.cindex.Index.create()
@@ -640,10 +679,9 @@ class Indexer(object):
             None,
             clang.cindex.TranslationUnit.PARSE_INCOMPLETE |
             clang.cindex.TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD)
-        idx = Indexer._IndexResult(cmd)
+        idx = _Indexer.IndexResult(cmd)
         self._find_references(unit.cursor, idx)
-        idx.diagnostics = self._filter_diagnostics(unit.diagnostics)
-        print "indexing", cmd.filename
+        idx.errors = self._filter_diagnostics(unit.diagnostics)
         idx.includes = self._filter_includes(
             unit.get_includes(),
             cmd.current_dir)
@@ -653,4 +691,16 @@ class Indexer(object):
 
     @staticmethod
     def _filter_diagnostics(diags):
-        return [repr(d) for d in diags]
+        def translate_diag(clang_diag):
+            loc = clang_diag.location
+            if loc.file:
+                filename = loc.file.name
+            else:
+                filename = "unknown"
+            return _Indexer.Diag(clang_diag.spelling,
+                                 filename,
+                                 loc.line,
+                                 loc.column,
+                                 clang_diag.disable_option)
+        return [translate_diag(d)
+                for d in diags if d.severity >= clang.cindex.Diagnostic.Error]

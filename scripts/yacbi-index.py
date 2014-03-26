@@ -18,39 +18,19 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 """
-
-import collections
-import json
+import logging
 import os
+import sys
+
 import yacbi
 
 
-Config = collections.namedtuple(
-    'Config', ['extra_args', 'banned_args', 'overrides'])
-
-
-def read_config():
-    config_filename = '.yacbi.json'
-    js = {}
-    if os.path.isfile(config_filename):
-        with open(config_filename, 'r') as config_fd:
-            js = json.load(config_fd)
-    return Config(js.get('extra_args', []),
-                  js.get('banned_args', []),
-                  js.get('overrides', []))
-
-
 def main():
-    config = read_config()
-    root = os.getcwd()
-    compilation_db = yacbi.CompilationDatabase(
-        root,
-        config.extra_args,
-        config.banned_args)
-    with yacbi.connect_to_db(root) as conn:
-        indexer = yacbi.Indexer(conn, compilation_db, root)
-        indexer.run()
-        conn.commit()
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+    yacbi.logger.addHandler(stderr_handler)
+    yacbi.logger.setLevel(logging.ERROR)
+    yacbi.create_or_update(os.getcwd())
 
 
 if __name__ == '__main__':
