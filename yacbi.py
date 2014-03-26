@@ -100,64 +100,81 @@ _KIND_TO_DESC = {
 }
 
 
+_PATH_ARGS = (
+    '-include',
+    '-isystem',
+    '-I',
+    '-iquote',
+    '--sysroot=',
+    '-isysroot',
+)
+
+
+_CPP_EXTENSIONS = (
+    '.cc',
+    '.cp',
+    '.cxx',
+    '.cpp',
+    '.CPP',
+    '.c++',
+    '.C',
+)
+
+
+def _handle_two_part_arg(arg, itr, all_args):
+    all_args.append(arg)
+    arg = next(itr, None)
+    if arg is not None:
+        all_args.append(arg)
+
+
+def _handle_two_part_include_arg(arg, itr, all_args, cwd, iincludes):
+    all_args.append(arg)
+    arg = next(itr, None)
+    if arg is not None:
+        abs_path = _make_absolute_path(cwd, arg)
+        if all_args[-1] == '-include':
+            iincludes.add(abs_path)
+        all_args.append(abs_path)
+
+
+def _handle_one_part_include_arg(arg, all_args, cwd, iincludes):
+    for path_arg in _PATH_ARGS:
+        if arg.startswith(path_arg):
+            path = arg[len(path_arg):]
+            abs_path = _make_absolute_path(cwd, path)
+            if path_arg == '-include':
+                iincludes.add(abs_path)
+            all_args.append(path_arg + abs_path)
+            break
+
+
 def _make_compile_args(cwd, args, extra_args, banned_args):
-    path_args = ('-include',
-                 '-isystem',
-                 '-I',
-                 '-iquote',
-                 '--sysroot=',
-                 '-isysroot',)
     all_args = []
     iincludes = set()
     has_x = False
-    done = object()
     itr = itertools.chain(args, extra_args)
-    arg = next(itr, done)
-    while arg is not done:
+    arg = next(itr, None)
+    while arg is not None:
         if not arg in banned_args:
-            if arg in ('-nostdinc',):
+            if arg in ('-nostdinc',) or arg.startswith(('-D', '-W', '-std=')):
                 all_args.append(arg)
-            elif arg in ('-x', '-Xpreprocessor',):
-                if arg == '-x':
-                    has_x = True
-                all_args.append(arg)
-                arg = next(itr, done)
-                if arg is not done:
-                    all_args.append(arg)
-            elif arg.startswith(('-D', '-W', '-std=',)):
-                all_args.append(arg)
-            elif arg in path_args:
-                all_args.append(arg)
-                arg = next(itr, done)
-                if arg is not done:
-                    abs_path = _make_absolute_path(cwd, arg)
-                    if all_args[-1] == '-include':
-                        iincludes.add(abs_path)
-                    all_args.append(abs_path)
+            elif arg == '-x':
+                has_x = True
+                _handle_two_part_arg(arg, itr, all_args)
+            elif arg == '-Xpreprocessor':
+                _handle_two_part_arg(arg, itr, all_args)
+            elif arg in _PATH_ARGS:
+                _handle_two_part_include_arg(arg, itr, all_args, cwd, iincludes)
             else:
-                for path_arg in path_args:
-                    if arg.startswith(path_arg):
-                        path = arg[len(path_arg):]
-                        abs_path = _make_absolute_path(cwd, path)
-                        if path_arg == '-include':
-                            iincludes.add(abs_path)
-                        all_args.append(path_arg + abs_path)
-                        break
-        arg = next(itr, done)
+                _handle_one_part_include_arg(arg, all_args, cwd, iincludes)
+        arg = next(itr, None)
     return CompileArgs(all_args, iincludes, has_x)
 
 
 def _is_cpp_source(path):
     ext = os.path.splitext(path)[1]
-    cpp_extensions = (
-        '.cc',
-        '.cp',
-        '.cxx',
-        '.cpp',
-        '.CPP',
-        '.c++',
-        '.C',)
-    return ext in cpp_extensions
+    return ext in _CPP_EXTENSIONS
 
 
 class CompilationDatabase(object):
@@ -621,7 +638,7 @@ class Indexer(object):
             clang.cindex.TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD)
         idx = Indexer._IndexResult(cmd)
         self._find_references(unit.cursor, idx)
-        idx.diagnostics = [repr(d) for d in unit.diagnostics]
+        idx.diagnostics = self._filter_diagnostics(unit.diagnostics)
         print "indexing", cmd.filename
         idx.includes = self._filter_includes(
             unit.get_includes(),
@@ -629,3 +646,7 @@ class Indexer(object):
         for inc in cmd.args.iincludes:
             idx.includes.add(inc)
         return idx
+
+    @staticmethod
+    def _filter_diagnostics(diags):
+        return [repr(d) for d in diags]
