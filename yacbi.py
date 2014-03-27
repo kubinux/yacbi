@@ -50,7 +50,7 @@ def _make_absolute_path(cwd, path):
 
 
 _CompileArgs = collections.namedtuple(
-    '_CompileArgs', ['all_args', 'iincludes', 'has_x'])
+    '_CompileArgs', ['all_args', 'includes', 'has_x'])
 
 
 _CompileCommand = collections.namedtuple(
@@ -130,30 +130,30 @@ def _handle_two_part_arg(arg, itr, all_args):
         all_args.append(arg)
 
 
-def _handle_two_part_include_arg(arg, itr, all_args, cwd, iincludes):
+def _handle_two_part_include_arg(arg, itr, all_args, cwd, includes):
     all_args.append(arg)
     arg = next(itr, None)
     if arg is not None:
         abs_path = _make_absolute_path(cwd, arg)
         if all_args[-1] == '-include':
-            iincludes.add(abs_path)
+            includes.add(abs_path)
         all_args.append(abs_path)
 
 
-def _handle_one_part_include_arg(arg, all_args, cwd, iincludes):
+def _handle_one_part_include_arg(arg, all_args, cwd, includes):
     for path_arg in _PATH_ARGS:
         if arg.startswith(path_arg):
             path = arg[len(path_arg):]
             abs_path = _make_absolute_path(cwd, path)
             if path_arg == '-include':
-                iincludes.add(abs_path)
+                includes.add(abs_path)
             all_args.append(path_arg + abs_path)
             break
 
 
 def _make_compile_args(cwd, args, extra_args, banned_args):
     all_args = []
-    iincludes = set()
+    includes = set()
     has_x = False
     itr = itertools.chain(args, extra_args)
     arg = next(itr, None)
@@ -167,11 +167,11 @@ def _make_compile_args(cwd, args, extra_args, banned_args):
             elif arg == '-Xpreprocessor':
                 _handle_two_part_arg(arg, itr, all_args)
             elif arg in _PATH_ARGS:
-                _handle_two_part_include_arg(arg, itr, all_args, cwd, iincludes)
+                _handle_two_part_include_arg(arg, itr, all_args, cwd, includes)
             else:
-                _handle_one_part_include_arg(arg, all_args, cwd, iincludes)
+                _handle_one_part_include_arg(arg, all_args, cwd, includes)
         arg = next(itr, None)
-    return _CompileArgs(all_args, iincludes, has_x)
+    return _CompileArgs(all_args, includes, has_x)
 
 
 def _is_cpp_source(path):
@@ -196,7 +196,7 @@ class _CompilationDatabase(object):
     def get_compile_command(self, filename):
         compile_commands = self._db.getCompileCommands(filename)
         if not compile_commands:
-            raise KeyError(filename)
+            return None
         ccmd = compile_commands[0]
         args = _make_compile_args(ccmd.directory,
                                   ccmd.arguments,
@@ -249,7 +249,8 @@ def _connect_to_db(root_dir):
     CREATE TABLE IF NOT EXISTS includes (
       including_file_id INTEGER NOT NULL,
       included_file_id INTEGER NOT NULL,
-      PRIMARY KEY (including_file_id, included_file_id),
+      line INTEGER NOT NULL,
+      PRIMARY KEY (including_file_id, included_file_id, line),
       FOREIGN KEY (including_file_id) REFERENCES files (id) ON DELETE CASCADE,
       FOREIGN KEY (included_file_id) REFERENCES files (id) ON DELETE CASCADE
     );
@@ -381,96 +382,139 @@ def create_or_update(root):
         config.extra_args,
         config.banned_args)
     with _connect_to_db(root) as conn:
-        indexer = _Indexer(conn, compilation_db, root)
-        indexer.run()
+        file_manager = _FileManager(root, conn, compilation_db)
+        for cmd in file_manager:
+            print "Indexing:", cmd.filename
+            indexer = Indexer(file_manager, cmd)
+            indexer.index()
+            file_manager.save_indices(indexer.idx_by_path.values())
+        file_manager.remove_orphaned_includes()
         conn.commit()
 
 
-class _Indexer(object):
-    RefLocation = collections.namedtuple('RefLocation', ['line', 'column'])
+_LocationInFile = collections.namedtuple('_LocationInFile', ['line', 'column'])
 
-    Ref = collections.namedtuple('Ref', ['is_definition', 'kind'])
 
-    Diag = collections.namedtuple(
-        'Diag', ['spelling', 'filename', 'line', 'column', 'disable_option'])
+_ReferenceData = collections.namedtuple(
+    '_ReferenceData', ['is_definition', 'kind'])
 
-    class IndexResult(object):
-        def __init__(self, cmd):
-            self.filename = cmd.filename
-            self.cwd = cmd.current_dir
-            self.args = cmd.args
-            self.errors = []
-            self.includes = []
-            self.references_by_usr = {}
-            self.file_id = None
-            self.is_included = cmd.is_included
 
-        def add_reference(self, usr, loc, ref):
-            refs = self.references_by_usr.get(usr, None)
-            if refs is None:
-                refs = {loc: ref}
-                self.references_by_usr[usr] = refs
+_Error = collections.namedtuple(
+    '_Error', ['spelling', 'filename', 'line', 'column', 'disable_option'])
+
+
+_FileInclusion = collections.namedtuple(
+    '_FileInclusion', ['included_path', 'line'])
+
+
+class _Index(object):
+    def __init__(self, cmd):
+        self.filename = cmd.filename
+        self.cwd = cmd.current_dir
+        self.args = cmd.args
+        self.includes = set()
+        self.references_by_usr = {}
+        self.file_id = None
+        self.is_included = cmd.is_included
+        if not self.args.has_x and _is_cpp_source(self.filename):
+            all_args = ['-x', 'c++']
+            all_args.extend(self.args.all_args)
+            self.child_args = _CompileArgs(all_args, self.cwd, True)
+        else:
+            self.child_args = self.args
+
+    def add_reference(self, usr, loc, ref):
+        refs = self.references_by_usr.get(usr, None)
+        if refs is None:
+            refs = {loc: ref}
+            self.references_by_usr[usr] = refs
+        else:
+            old_ref = refs.get(loc, None)
+            if old_ref is None or ref > old_ref:
+                refs[loc] = ref
+
+    def add_include(self, inc):
+        self.includes.add(inc)
+
+    def make_child_compile_command(self, child_filename):
+        return _CompileCommand(child_filename, self.child_args, self.cwd, True)
+
+
+class _FileManager(object):
+    class File(object):
+        def __init__(self, path, last_update, is_included):
+            self.path = path
+            self.last_update = last_update
+            self.is_included = is_included
+
+        def needs_update(self):
+            return self.get_mtime() >= self.last_update
+
+        def get_mtime(self):
+            return datetime.datetime.fromtimestamp(os.path.getmtime(self.path))
+
+    def __init__(self, root, conn, comp_db):
+        self.root = root + os.path.sep
+        self.conn = conn
+        self.comp_db = comp_db
+        self.visited = set()
+        self.now = datetime.datetime.now()
+        files = self._query_existing_files()
+        comp_db_paths = self.comp_db.get_all_files()
+        src_paths = set()
+        inc_paths = set()
+        for f in files:
+            if f.is_included:
+                inc_paths.add(f.path)
             else:
-                old_ref = refs.get(loc, None)
-                if old_ref is None or ref > old_ref:
-                    refs[loc] = ref
-
-    def __init__(self, conn, comp_db, project_root):
-        self._conn = conn
-        self._comp_db = comp_db
-        self._root = project_root
-        self._now = datetime.datetime.now()
-        self._errors_left = 0
-
-    def run(self):
-        self._now = datetime.datetime.now()
-        add_files, rm_files = self._get_adds_and_removes()
-        self._remove_files_from_db(rm_files)
-        self._process_files(
-            [self._comp_db.get_compile_command(src) for src in add_files])
-        self._process_files(self._get_commands_for_updates())
-        self._remove_orphaned_includes()
-
-    def _get_adds_and_removes(self):
-        cur = self._conn.cursor()
-        cur.execute('SELECT path FROM files WHERE is_included = 0')
-        db_files = set()
-        for tup in cur.fetchall():
-            db_files.add(tup[0])
-        comp_db_files = self._comp_db.get_all_files()
-        rm_files = db_files - comp_db_files
-        add_files = comp_db_files - db_files
-        return add_files, rm_files
-
-    def _remove_files_from_db(self, filenames):
-        cur = self._conn.cursor()
-        for filename in filenames:
-            cur.execute("SELECT id FROM files WHERE path = ? LIMIT 1",
-                        (filename,))
-            file_id = cur.fetchone()
-            if file_id:
-                cur.execute("""
-                            SELECT EXISTS (
-                              SELECT 1
-                              FROM includes
-                              WHERE included_file_id = ?
-                              LIMIT 1)""",
-                            file_id)
-                if cur.fetchone()[0]:
-                    cur.execute(
-                        "UPDATE files SET is_included = 1 WHERE id = ?",
-                        file_id)
+                src_paths.add(f.path)
+        paths_to_remove = src_paths - comp_db_paths
+        self.sources_to_add = comp_db_paths - src_paths
+        removed_paths = self._remove_files(paths_to_remove)
+        self.sources_to_update = set()
+        self.headers_to_update = set()
+        for f in files:
+            if f.path not in removed_paths:
+                if f.needs_update():
+                    if f.is_included:
+                        self.headers_to_update.add(f.path)
+                    else:
+                        self.sources_to_update.add(f.path)
                 else:
-                    cur.execute("DELETE FROM files WHERE id = ?", file_id)
+                    self.visited.add(f.path)
 
-    def _remove_orphaned_includes(self):
+    def should_index(self, path):
+        if path in self.visited:
+            return False
+        self.visited.add(path)
+        if path in self.headers_to_update:
+            self.headers_to_update.remove(path)
+            return True
+        elif path in self.sources_to_add or path in self.sources_to_update:
+            return False
+        else:
+            return path.startswith(self.root)
+
+    def __iter__(self):
+        return self
+
+    def save_indices(self, indices):
+        for idx in indices:
+            file_id = self._save_file(idx.filename, idx.cwd, idx.is_included)
+            idx.file_id = file_id
+            self._save_args(file_id, idx.args.all_args)
+            self._save_refs(file_id, idx.references_by_usr)
+        for idx in indices:
+            self._save_includes(idx)
+
+    def remove_orphaned_includes(self):
         #
         # DELETE FROM files WHERE is_included = 1 AND
         # NOT EXISTS (SELECT 1 FROM includes i
         # WHERE i.included_file_id = files.id LIMIT 1)
         #
         # seems to be slower in case when there are no orphans.
-        cur = self._conn.cursor()
+        cur = self.conn.cursor()
         while True:
             cur.execute("SELECT id FROM files WHERE is_included = 1")
             all_includes = set(cur.fetchall())
@@ -482,83 +526,8 @@ class _Indexer(object):
             for inc in orphans:
                 cur.execute("DELETE FROM files WHERE id = ?", inc)
 
-    def _process_files(self, compile_commands):
-        cur = self._conn.cursor()
-        indexed_so_far = set()
-        indexed_files = []
-        commands = compile_commands
-        while commands:
-            new_commands = []
-            for cmd in commands:
-                idx = self._index_file(cmd)
-                if logger.isEnabledFor(logging.ERROR):
-                    for err in idx.errors:
-                        logger.error("%s:%d:%d: %s",
-                                     err.filename,
-                                     err.line,
-                                     err.column,
-                                     err.spelling)
-                indexed_files.append(idx)
-                indexed_so_far.add(idx.filename)
-                for inc in idx.includes:
-                    if inc in indexed_so_far:
-                        continue
-                    indexed_so_far.add(inc)
-                    cur.execute("SELECT id FROM files WHERE path = ?", (inc,))
-                    if cur.fetchone() is None:
-                        if (not idx.is_included
-                                and not idx.args.has_x
-                                and _is_cpp_source(idx.filename)):
-                            all_args = ['-x', 'c++']
-                            all_args.extend(idx.args.all_args)
-                            args = _CompileArgs(all_args,
-                                                idx.args.iincludes,
-                                                True)
-                        else:
-                            args = idx.args
-                        new_cmd = _CompileCommand(inc, args, idx.cwd, True)
-                        new_commands.append(new_cmd)
-            commands = new_commands
-        for idx in indexed_files:
-            file_id = self._save_file(idx.filename, idx.cwd, idx.is_included)
-            idx.file_id = file_id
-            self._save_args(file_id, idx.args.all_args)
-            self._save_refs(file_id, idx.references_by_usr)
-        for idx in indexed_files:
-            self._save_includes(idx.file_id, idx.includes)
-
-    @staticmethod
-    def _get_mtime(path):
-        return datetime.datetime.fromtimestamp(os.path.getmtime(path))
-
-    def _get_commands_for_updates(self):
-        cur = self._conn.cursor()
-        cur.execute("""
-                    SELECT id,
-                      path,
-                      last_update as "last_update [timestamp]",
-                      working_dir,
-                      is_included
-                    FROM files""")
-        update_commands = []
-        for tup in cur.fetchall():
-            if os.path.isfile(tup[1]):
-                if self._get_mtime(tup[1]) >= tup[2]:
-                    cur.execute("""
-                                SELECT arg FROM compile_args WHERE file_id = ?
-                                ORDER BY id""",
-                                (tup[0],))
-                    args = [arg[0] for arg in cur.fetchall()]
-                    cwd = tup[3]
-                    cmd = _CompileCommand(tup[1],
-                                          _make_compile_args(cwd, args, [], []),
-                                          cwd,
-                                          tup[4])
-                    update_commands.append(cmd)
-        return update_commands
-
     def _save_file(self, path, cwd, is_included):
-        cur = self._conn.cursor()
+        cur = self.conn.cursor()
         cur.execute("SELECT id FROM files WHERE path = ? LIMIT 1", (path,))
         file_id = cur.fetchone()
         if file_id is None:
@@ -569,7 +538,7 @@ class _Indexer(object):
                           last_update,
                           is_included)
                         VALUES (?, ?, ?, ?)""",
-                        (path, cwd, self._now, is_included))
+                        (path, cwd, self.now, is_included))
             file_id = cur.lastrowid
         else:
             file_id = file_id[0]
@@ -579,25 +548,25 @@ class _Indexer(object):
                           last_update = ?,
                           is_included = ?
                         WHERE id = ?""",
-                        (cwd, self._now, is_included, file_id))
+                        (cwd, self.now, is_included, file_id))
         return file_id
 
-    def _save_args(self, file_id, all_args):
-        cur = self._conn.cursor()
+    def _save_args(self, file_id, args):
+        cur = self.conn.cursor()
         cur.execute("""
                     DELETE FROM compile_args
                     WHERE file_id = ?""",
                     (file_id,))
-        if all_args:
+        if args:
             cur.executemany("""
                             INSERT INTO compile_args (
                               file_id,
                               arg)
                             VALUES (?, ?)""",
-                            [(file_id, arg) for arg in all_args])
+                            [(file_id, arg) for arg in args])
 
     def _save_refs(self, file_id, refs_by_usr):
-        cur = self._conn.cursor()
+        cur = self.conn.cursor()
         cur.execute("DELETE FROM refs WHERE file_id = ?", (file_id,))
         for usr, refs in refs_by_usr.iteritems():
             cur.execute("""
@@ -623,84 +592,190 @@ class _Indexer(object):
                 [(symbol_id, file_id, l.line, l.column, r.kind, r.is_definition)
                  for l, r in refs.iteritems()])
 
-    def _save_includes(self, file_id, includes):
-        cur = self._conn.cursor()
+    def _save_includes(self, idx):
+        cur = self.conn.cursor()
         cur.execute("""
                     DELETE FROM includes WHERE including_file_id = ?""",
-                    (file_id,))
+                    (idx.file_id,))
         inc_values = []
-        for inc in includes:
+        for inc in idx.includes:
+            path = inc.included_path
             cur.execute(
                 """
                 SELECT id FROM files WHERE path = ? LIMIT 1""",
-                (inc,))
+                (path,))
             inc_id = cur.fetchone()
-            inc_values.append((file_id, inc_id[0]))
+            if inc_id:
+                inc_id = inc_id[0]
+            elif self.should_index(path):
+                # the file must have been empty, so we create a dummy entry
+                inc_id = self._save_file(path, self.root, True)
+                self._save_args(inc_id, idx.child_args.all_args)
+            else:
+                # the file is not intended to be stored
+                continue
+            inc_values.append((idx.file_id, inc_id, inc.line))
         if inc_values:
             cur.executemany("""
                             INSERT INTO includes (
                               including_file_id,
-                              included_file_id)
-                            VALUES (?, ?)""",
+                              included_file_id,
+                              line)
+                            VALUES (?, ?, ?)""",
                             inc_values)
 
-    def _filter_includes(self, all_includes, cwd):
-        direct_includes = set()
-        for inc in all_includes:
-            if inc.depth < 2:
-                path = _make_absolute_path(cwd, inc.include.name)
-                if path.startswith(self._root + os.path.sep):
-                    direct_includes.add(path)
-        return direct_includes
+    def next(self):
+        if self.sources_to_add:
+            path = self.sources_to_add.pop()
+            self.visited.add(path)
+            return self.comp_db.get_compile_command(path)
+        elif self.sources_to_update:
+            path = self.sources_to_update.pop()
+            self.visited.add(path)
+            cmd = self.comp_db.get_compile_command(path)
+            if not cmd:
+                cmd = self._query_compile_command(path)
+            return cmd
+        elif self.headers_to_update:
+            path = self.headers_to_update.pop()
+            self.visited.add(path)
+            return self._query_compile_command(path)
+        else:
+            raise StopIteration
 
-    @staticmethod
-    def _find_references(clang_cursor, idx):
-        if not clang_cursor.location.file:
-            for child_cursor in clang_cursor.get_children():
-                _Indexer._find_references(child_cursor, idx)
-        elif clang_cursor.location.file.name == idx.filename:
-            if clang_cursor.referenced:
-                usr = clang_cursor.referenced.get_usr()
-                if usr and usr != "c:":
-                    idx.add_reference(
-                        usr,
-                        _Indexer.RefLocation(clang_cursor.location.line,
-                                             clang_cursor.location.column),
-                        _Indexer.Ref(clang_cursor.is_definition(),
-                                     clang_cursor.kind.from_param()))
-            for child_cursor in clang_cursor.get_children():
-                _Indexer._find_references(child_cursor, idx)
+    def _query_existing_files(self):
+        cur = self.conn.cursor()
+        cur.execute("""
+                    SELECT
+                      path,
+                      last_update as "last_update [timestamp]",
+                      is_included
+                    FROM files
+                    ORDER BY path""")
+        return [self.File(*tup) for tup in cur.fetchall()]
 
-    def _index_file(self, cmd):
-        clang_idx = clang.cindex.Index.create()
-        unit = clang_idx.parse(
-            cmd.filename,
-            cmd.args.all_args,
+    def _query_compile_command(self, path):
+        cur = self.conn.cursor()
+        cur.execute("""
+                    SELECT
+                      id,
+                      working_dir,
+                      is_included
+                    FROM files
+                    WHERE path = ?""",
+                    (path,))
+        file_id, cwd, is_included = cur.fetchone()
+        cur.execute("""
+                    SELECT arg
+                    FROM compile_args
+                    WHERE file_id = ?
+                    ORDER BY id""",
+                    (file_id,))
+        args = [tup[0] for tup in cur.fetchall()]
+        return _CompileCommand(path,
+                               _make_compile_args(cwd, args, [], []),
+                               cwd,
+                               is_included)
+
+    def _remove_files(self, paths):
+        cur = self.conn.cursor()
+        removed = set()
+        for path in paths:
+            cur.execute("SELECT id FROM files WHERE path = ? LIMIT 1",
+                        (path,))
+            file_id = cur.fetchone()
+            cur.execute("""
+                        SELECT EXISTS (
+                            SELECT 1
+                            FROM includes
+                            WHERE included_file_id = ?
+                            LIMIT 1)""",
+                        file_id)
+            if cur.fetchone()[0]:
+                cur.execute(
+                    "UPDATE files SET is_included = 1 WHERE id = ?",
+                    file_id)
+            else:
+                cur.execute("DELETE FROM files WHERE id = ?", file_id)
+                removed.add(path)
+        return removed
+
+
+class Indexer(object):
+    def __init__(self, file_manager, cmd):
+        self.file_manager = file_manager
+        self.filename = cmd.filename
+        self.cwd = cmd.current_dir
+        self.args = cmd.args
+        self.src_index = _Index(cmd)
+        self.is_included = cmd.is_included
+        self.idx_by_path = {self.filename: self.src_index}
+        self.errors = []
+
+    def index(self):
+        clang_index = clang.cindex.Index.create()
+        unit = clang_index.parse(
+            self.filename,
+            self.args.all_args,
             None,
             clang.cindex.TranslationUnit.PARSE_INCOMPLETE |
             clang.cindex.TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD)
-        idx = _Indexer.IndexResult(cmd)
-        self._find_references(unit.cursor, idx)
-        idx.errors = self._filter_diagnostics(unit.diagnostics)
-        idx.includes = self._filter_includes(
-            unit.get_includes(),
-            cmd.current_dir)
-        for inc in cmd.args.iincludes:
-            idx.includes.add(inc)
+        self._find_references(unit.cursor)
+        self._sort_includes(unit.get_includes())
+        self._populate_errors(unit.diagnostics)
+
+    def _find_references(self, cursor):
+        location = cursor.location
+        if not location.file:
+            for child_cursor in cursor.get_children():
+                self._find_references(child_cursor)
+        else:
+            path = unicode(os.path.abspath(location.file.name))
+            idx = self._get_index(path)
+            if idx:
+                if cursor.referenced:
+                    usr = cursor.referenced.get_usr()
+                    if usr and usr != "c:":
+                        idx.add_reference(
+                            usr,
+                            _LocationInFile(location.line, location.column),
+                            _ReferenceData(cursor.is_definition(),
+                                           cursor.kind.from_param()))
+                for child_cursor in cursor.get_children():
+                    self._find_references(child_cursor)
+
+    def _get_index(self, path):
+        idx = self.idx_by_path.get(path, None)
+        if not idx and self.file_manager.should_index(path):
+            idx = self._make_child_index(path)
+            self.idx_by_path[path] = idx
         return idx
 
-    @staticmethod
-    def _filter_diagnostics(diags):
-        def translate_diag(clang_diag):
-            loc = clang_diag.location
+    def _make_child_index(self, path):
+        return _Index(self.src_index.make_child_compile_command(path))
+
+    def _populate_errors(self, diags):
+        def translate_diag(diag):
+            loc = diag.location
             if loc.file:
                 filename = loc.file.name
             else:
-                filename = "unknown"
-            return _Indexer.Diag(clang_diag.spelling,
-                                 filename,
-                                 loc.line,
-                                 loc.column,
-                                 clang_diag.disable_option)
-        return [translate_diag(d)
-                for d in diags if d.severity >= clang.cindex.Diagnostic.Error]
+                filename = self.filename
+            return _Error(diag.spelling,
+                          filename,
+                          loc.line,
+                          loc.column,
+                          diag.disable_option)
+        self.errors = [translate_diag(d)
+                       for d in diags
+                       if d.severity >= clang.cindex.Diagnostic.Error]
+
+    def _sort_includes(self, includes):
+        if not self.is_included:
+            for inc in self.args.includes:
+                self.src_index.add_include(_FileInclusion(unicode(inc), 0))
+        for inc in includes:
+            idx = self.idx_by_path.get(unicode(inc.source), None)
+            if idx:
+                idx.add_include(_FileInclusion(unicode(inc.include),
+                                               inc.location.line))
