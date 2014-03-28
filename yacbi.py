@@ -29,11 +29,13 @@ import datetime
 
 __all__ = [
     'logger',
+    'SourceLocation',
     'Reference',
     'get_root_for_path',
     'query_compile_args',
     'query_definitions',
     'query_references',
+    'query_including_files',
     'create_or_update',
     ]
 
@@ -57,9 +59,12 @@ _CompileCommand = collections.namedtuple(
     '_CompileCommand', ['filename', 'args', 'current_dir', 'is_included'])
 
 
+SourceLocation = collections.namedtuple(
+    'SourceLocation', ['filename', 'line', 'column'])
+
+
 Reference = collections.namedtuple(
-    'Reference',
-    ['filename', 'line', 'column', 'is_definition', 'kind', 'description'])
+    'Reference', ['location', 'is_definition', 'kind', 'description'])
 
 
 _KIND_TO_DESC = {
@@ -250,7 +255,8 @@ def _connect_to_db(root_dir):
       including_file_id INTEGER NOT NULL,
       included_file_id INTEGER NOT NULL,
       line INTEGER NOT NULL,
-      PRIMARY KEY (including_file_id, included_file_id, line),
+      "column" INTEGER NOT NULL,
+      PRIMARY KEY (including_file_id, included_file_id, line, "column"),
       FOREIGN KEY (including_file_id) REFERENCES files (id) ON DELETE CASCADE,
       FOREIGN KEY (included_file_id) REFERENCES files (id) ON DELETE CASCADE
     );
@@ -317,9 +323,7 @@ def query_definitions(root, usr):
                 r.line ASC,
                 r.column ASC
         """, symbol_id)
-        return [Reference(filename=t[0],
-                          line=t[1],
-                          column=t[2],
+        return [Reference(SourceLocation(*t[0:3]),
                           kind=t[3],
                           description=_KIND_TO_DESC.get(t[3], "???"),
                           is_definition=True)
@@ -351,13 +355,36 @@ def query_references(root, usr):
                 r.line ASC,
                 r.column ASC
         """, symbol_id)
-        return [Reference(filename=t[0],
-                          line=t[1],
-                          column=t[2],
+        return [Reference(SourceLocation(*t[0:3]),
                           kind=t[3],
                           description=_KIND_TO_DESC.get(t[3], "???"),
                           is_definition=t[4])
                 for t in cur.fetchall()]
+
+
+def query_including_files(root, included_file):
+    with _connect_to_db(root) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM files WHERE path = ? LIMIT 1",
+                    (included_file,))
+        file_id = cur.fetchone()
+        if not file_id:
+            return []
+        cur.execute("""
+            SELECT
+                f.path,
+                i.line,
+                i."column"
+            FROM
+                includes i LEFT OUTER JOIN
+                files f ON (i.including_file_id = f.id)
+            WHERE
+                i.included_file_id = ?
+            ORDER BY
+                f.path ASC,
+                i.line ASC
+        """, file_id)
+        return [SourceLocation(*t) for t in cur.fetchall()]
 
 
 _Config = collections.namedtuple(
@@ -384,9 +411,16 @@ def create_or_update(root):
     with _connect_to_db(root) as conn:
         file_manager = _FileManager(root, conn, compilation_db)
         for cmd in file_manager:
-            print "Indexing:", cmd.filename
+            logger.info("indexing: %s", cmd.filename)
             indexer = Indexer(file_manager, cmd)
             indexer.index()
+            if logger.isEnabledFor(logging.ERROR):
+                for e in indexer.errors:
+                    logger.error("%s:%d:%d: %s",
+                                 e.location.filename,
+                                 e.location.line,
+                                 e.location.column,
+                                 e.spelling)
             file_manager.save_indices(indexer.idx_by_path.values())
         file_manager.remove_orphaned_includes()
         conn.commit()
@@ -400,11 +434,11 @@ _ReferenceData = collections.namedtuple(
 
 
 _Error = collections.namedtuple(
-    '_Error', ['spelling', 'filename', 'line', 'column', 'disable_option'])
+    '_Error', ['spelling', 'location', 'disable_option'])
 
 
 _FileInclusion = collections.namedtuple(
-    '_FileInclusion', ['included_path', 'line'])
+    '_FileInclusion', ['included_path', 'line', 'column'])
 
 
 class _Index(object):
@@ -614,14 +648,15 @@ class _FileManager(object):
             else:
                 # the file is not intended to be stored
                 continue
-            inc_values.append((idx.file_id, inc_id, inc.line))
+            inc_values.append((idx.file_id, inc_id, inc.line, inc.column))
         if inc_values:
             cur.executemany("""
                             INSERT INTO includes (
                               including_file_id,
                               included_file_id,
-                              line)
-                            VALUES (?, ?, ?)""",
+                              line,
+                              "column")
+                            VALUES (?, ?, ?, ?)""",
                             inc_values)
 
     def next(self):
@@ -762,9 +797,7 @@ class Indexer(object):
             else:
                 filename = self.filename
             return _Error(diag.spelling,
-                          filename,
-                          loc.line,
-                          loc.column,
+                          SourceLocation(filename, loc.line, loc.column),
                           diag.disable_option)
         self.errors = [translate_diag(d)
                        for d in diags
@@ -773,9 +806,12 @@ class Indexer(object):
     def _sort_includes(self, includes):
         if not self.is_included:
             for inc in self.args.includes:
-                self.src_index.add_include(_FileInclusion(unicode(inc), 0))
+                self.src_index.add_include(_FileInclusion(inc, 0, 0))
         for inc in includes:
-            idx = self.idx_by_path.get(unicode(inc.source), None)
-            if idx:
-                idx.add_include(_FileInclusion(unicode(inc.include),
-                                               inc.location.line))
+            if inc.source:
+                idx = self.idx_by_path.get(inc.source.name, None)
+                if idx:
+                    idx.add_include(_FileInclusion(
+                        os.path.normpath(inc.include.name),
+                        inc.location.line,
+                        inc.location.column))
