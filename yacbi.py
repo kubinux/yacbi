@@ -189,6 +189,7 @@ def _handle_one_part_include_arg(arg, result_args, cwd, includes):
 def _make_compile_args(cwd, args, extra_args, banned_args):
     """Create compile arguments.
 
+    Arguments:
     cwd -- current working directory
     args -- list of all arguments as read from the compilation database
     extra_args -- additional arguments that should be appended to args
