@@ -45,6 +45,12 @@ logger.addHandler(logging.NullHandler())
 
 
 def _make_absolute_path(cwd, path):
+    """Return a normalized, absolute path.
+
+    Arguments:
+    cwd -- current working directory
+    path -- relative or absolute path
+    """
     if os.path.isabs(path):
         return os.path.normpath(path)
     else:
@@ -128,35 +134,66 @@ _CPP_EXTENSIONS = (
 )
 
 
-def _handle_two_part_arg(arg, itr, all_args):
-    all_args.append(arg)
+def _handle_two_part_arg(arg, itr, result_args):
+    """Process a compile argument which should be followed by a value.
+
+    Arguments:
+    arg -- current argument that needs a value
+    itr -- iterator to the list of all arguments being processed
+    result_args [out] -- list of filtered arguments
+    """
+    result_args.append(arg)
     arg = next(itr, None)
     if arg is not None:
-        all_args.append(arg)
+        result_args.append(arg)
 
 
-def _handle_two_part_include_arg(arg, itr, all_args, cwd, includes):
-    all_args.append(arg)
+def _handle_two_part_include_arg(arg, itr, result_args, cwd, includes):
+    """Process a compile argument which should be followed by an include path.
+
+    Arguments:
+    arg -- current argument that needs a value
+    itr -- iterator to the list of all arguments being processed
+    result_args [out] -- list of filtered arguments
+    cwd -- current working directory
+    includes [out] -- list of extra include files provided as arguments
+    """
+    result_args.append(arg)
     arg = next(itr, None)
     if arg is not None:
         abs_path = _make_absolute_path(cwd, arg)
-        if all_args[-1] == '-include':
+        if result_args[-1] == '-include':
             includes.add(abs_path)
-        all_args.append(abs_path)
+        result_args.append(abs_path)
 
 
-def _handle_one_part_include_arg(arg, all_args, cwd, includes):
+def _handle_one_part_include_arg(arg, result_args, cwd, includes):
+    """Process a compile argument which contains an include path.
+
+    Arguments:
+    arg -- current argument that needs a value
+    result_args [out] -- list of filtered arguments
+    cwd -- current working directory
+    includes [out] -- list of extra include files provided as arguments
+    """
     for path_arg in _PATH_ARGS:
         if arg.startswith(path_arg):
             path = arg[len(path_arg):]
             abs_path = _make_absolute_path(cwd, path)
             if path_arg == '-include':
                 includes.add(abs_path)
-            all_args.append(path_arg + abs_path)
+            result_args.append(path_arg + abs_path)
             break
 
 
 def _make_compile_args(cwd, args, extra_args, banned_args):
+    """Create compile arguments.
+
+    cwd -- current working directory
+    args -- list of all arguments as read from the compilation database
+    extra_args -- additional arguments that should be appended to args
+    banned_args -- arguments that should be ignored
+    """
     all_args = []
     includes = set()
     has_x = False
@@ -180,12 +217,22 @@ def _make_compile_args(cwd, args, extra_args, banned_args):
 
 
 def _is_cpp_source(path):
+    """Check if a file is a C++ source."""
     ext = os.path.splitext(path)[1]
     return ext in _CPP_EXTENSIONS
 
 
 class _CompilationDatabase(object):
+    """Wrapper around clang.cindex.CompilationDatabase."""
+
     def __init__(self, root, extra_args, banned_args):
+        """Initialize a new instance.
+
+        Arguments:
+        root -- parent directory of "compile_commands.json" file
+        extra_args -- additional arguments that should be added to commands
+        banned_args -- arguments that should be removed from commands
+        """
         self._extra_args = extra_args
         self._banned_args = banned_args
         self._all_files = set()
@@ -196,9 +243,11 @@ class _CompilationDatabase(object):
         self._db = clang.cindex.CompilationDatabase.fromDirectory(root)
 
     def get_all_files(self):
+        """Return a set of all files present in this compilation database."""
         return self._all_files
 
     def get_compile_command(self, filename):
+        """Return compile command for a given file or None if not found."""
         compile_commands = self._db.getCompileCommands(filename)
         if not compile_commands:
             return None
@@ -211,6 +260,11 @@ class _CompilationDatabase(object):
 
 
 def get_root_for_path(path):
+    """Return a Yacbi project root for a given path or None if not found.
+
+    For a given path, its Yacbi project root is the closest parent directory
+    that contains ".yacbi.db" file.
+    """
     if os.path.isdir(path):
         current_dir = os.path.dirname(path)
     else:
@@ -224,8 +278,15 @@ def get_root_for_path(path):
         current_dir = new_dir
 
 
-def _connect_to_db(root_dir):
-    dbfile = os.path.join(root_dir, '.yacbi.db')
+def _connect_to_db(root):
+    """Return a connection to a Yacbi database.
+
+    If the database does not exist, it is created and initialized.
+
+    Arguments:
+    root -- Yacbi project root
+    """
+    dbfile = os.path.join(root, '.yacbi.db')
     conn = sqlite3.connect(
         dbfile,
         detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
@@ -285,6 +346,12 @@ def _connect_to_db(root_dir):
 
 
 def query_compile_args(root, filename):
+    """Return a list of compile arguments for a given file.
+
+    Arguments:
+    root -- root directory of a Yacbi project
+    filename -- absolute, normalized file path
+    """
     with _connect_to_db(root) as conn:
         cur = conn.cursor()
         cur.execute("""SELECT id FROM files WHERE path = ?""", (filename,))
@@ -300,6 +367,12 @@ def query_compile_args(root, filename):
 
 
 def query_definitions(root, usr):
+    """Return a list of references (definitions only) for a given USR.
+
+    Arguments:
+    root -- root directory of a Yacbi project
+    usr -- Clang's Unified Symbol Reference
+    """
     with _connect_to_db(root) as conn:
         cur = conn.cursor()
         cur.execute("SELECT id FROM symbols WHERE usr = ? LIMIT 1", (usr,))
@@ -331,6 +404,12 @@ def query_definitions(root, usr):
 
 
 def query_references(root, usr):
+    """Return a list of all references for a given USR.
+
+    Arguments:
+    root -- root directory of a Yacbi project
+    usr -- Clang's Unified Symbol Reference
+    """
     with _connect_to_db(root) as conn:
         cur = conn.cursor()
         cur.execute("SELECT id FROM symbols WHERE usr = ? LIMIT 1", (usr,))
@@ -363,6 +442,12 @@ def query_references(root, usr):
 
 
 def query_including_files(root, included_file):
+    """Return a list locations where a given file is being included.
+
+    Arguments:
+    root -- root directory of a Yacbi project
+    included_file -- Clang's Unified Symbol Reference
+    """
     with _connect_to_db(root) as conn:
         cur = conn.cursor()
         cur.execute("SELECT id FROM files WHERE path = ? LIMIT 1",
