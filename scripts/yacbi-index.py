@@ -29,7 +29,7 @@ def main():
     stderr_handler = logging.StreamHandler(sys.stderr)
     stderr_handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
     yacbi.logger.addHandler(stderr_handler)
-    yacbi.logger.setLevel(logging.ERROR)
+    yacbi.logger.setLevel(logging.INFO)
     yacbi.create_or_update(os.getcwd())
 
 
