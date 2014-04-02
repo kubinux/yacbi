@@ -40,8 +40,17 @@ __all__ = [
     ]
 
 
+try:
+    from logging import NullHandler as _NullLogHandler
+except ImportError:
+    # python 2.6
+    class _NullLogHandler(logging.Handler):
+        def emit(self, record):
+            pass
+
+
 logger = logging.getLogger('yacbi')
-logger.addHandler(logging.NullHandler())
+logger.addHandler(_NullLogHandler())
 
 
 def _make_absolute_path(cwd, path):
@@ -384,7 +393,7 @@ def query_definitions(root, usr):
             SELECT
                 f.path,
                 r.line,
-                r.column,
+                r."column",
                 r.kind
             FROM
                 refs r LEFT OUTER JOIN
@@ -395,7 +404,7 @@ def query_definitions(root, usr):
             ORDER BY
                 f.path ASC,
                 r.line ASC,
-                r.column ASC
+                r."column" ASC
         """, symbol_id)
         return [Reference(SourceLocation(*t[0:3]),
                           kind=t[3],
@@ -421,7 +430,7 @@ def query_references(root, usr):
             SELECT
                 f.path,
                 r.line,
-                r.column,
+                r."column",
                 r.kind,
                 r.is_definition
             FROM
@@ -433,7 +442,7 @@ def query_references(root, usr):
                 r.is_definition DESC,
                 f.path ASC,
                 r.line ASC,
-                r.column ASC
+                r."column" ASC
         """, symbol_id)
         return [Reference(SourceLocation(*t[0:3]),
                           kind=t[3],
