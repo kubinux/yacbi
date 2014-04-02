@@ -245,20 +245,29 @@ class _CompilationDatabase(object):
         """
         self._extra_args = extra_args
         self._banned_args = banned_args
-        self._all_files = set()
-        db_path = os.path.join(root, 'compile_commands.json')
-        with open(db_path) as cdb:
+        self._path_to_key = {}
+        with open(os.path.join(root, 'compile_commands.json')) as cdb:
             for entry in json.load(cdb):
-                self._all_files.add(entry['file'])
+                cwd = entry['directory']
+                key = entry['file']
+                if not os.path.isabs(key):
+                    # keys in Clang's compilation database are absolute
+                    # but not normalized
+                    key = os.path.join(cwd, key)
+                path = os.path.normpath(key)
+                self._path_to_key[path] = key
         self._db = clang.cindex.CompilationDatabase.fromDirectory(root)
 
     def get_all_files(self):
         """Return a set of all files present in this compilation database."""
-        return self._all_files
+        return set(self._path_to_key.keys())
 
     def get_compile_command(self, filename):
         """Return compile command for a given file or None if not found."""
-        compile_commands = self._db.getCompileCommands(filename)
+        key = self._path_to_key.get(filename, None)
+        if not key:
+            return None
+        compile_commands = self._db.getCompileCommands(key)
         if not compile_commands:
             return None
         ccmd = compile_commands[0]
@@ -506,7 +515,7 @@ def create_or_update(root):
     with _connect_to_db(root) as conn:
         file_manager = _FileManager(root, conn, compilation_db)
         for cmd in file_manager:
-            logger.info("indexing: %s", cmd.filename)
+            logger.info("indexing %s", cmd.filename)
             indexer = Indexer(file_manager, cmd)
             indexer.index()
             if logger.isEnabledFor(logging.ERROR):
@@ -844,6 +853,9 @@ class Indexer(object):
 
     def index(self):
         clang_index = clang.cindex.Index.create()
+        logger.debug("parsing %s: %s",
+                     self.filename,
+                     " ".join(self.args.all_args))
         unit = clang_index.parse(
             self.filename,
             self.args.all_args,
