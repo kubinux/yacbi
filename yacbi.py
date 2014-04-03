@@ -35,6 +35,7 @@ __all__ = [
     'query_compile_args',
     'query_definitions',
     'query_references',
+    'query_subtypes',
     'query_including_files',
     'create_or_update',
     ]
@@ -449,6 +450,43 @@ def query_references(root, usr):
                 r.symbol_id = ?
             ORDER BY
                 r.is_definition DESC,
+                f.path ASC,
+                r.line ASC,
+                r."column" ASC
+        """, symbol_id)
+        return [Reference(SourceLocation(*t[0:3]),
+                          kind=t[3],
+                          description=_KIND_TO_DESC.get(t[3], "???"),
+                          is_definition=t[4])
+                for t in cur.fetchall()]
+
+
+def query_subtypes(root, usr):
+    """Return a list of all subtypes for a given USR.
+
+    Arguments:
+    root -- root directory of a Yacbi project
+    usr -- Clang's Unified Symbol Reference
+    """
+    with _connect_to_db(root) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM symbols WHERE usr = ? LIMIT 1", (usr,))
+        symbol_id = cur.fetchone()
+        if not symbol_id:
+            return []
+        cur.execute("""
+            SELECT
+                f.path,
+                r.line,
+                r."column",
+                r.kind,
+                r.is_definition
+            FROM
+                refs r LEFT OUTER JOIN
+                files f ON (r.file_id = f.id)
+            WHERE
+                r.symbol_id = ? AND r.kind = 44
+            ORDER BY
                 f.path ASC,
                 r.line ASC,
                 r."column" ASC
