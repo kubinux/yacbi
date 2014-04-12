@@ -283,14 +283,14 @@ def get_root_for_path(path):
     """Return a Yacbi project root for a given path or None if not found.
 
     For a given path, its Yacbi project root is the closest parent directory
-    that contains ".yacbi.db" file.
+    that contains ".yacbi" directory.
     """
     if os.path.isdir(path):
         current_dir = os.path.dirname(path)
     else:
         current_dir = path
     while True:
-        if os.path.isfile(os.path.join(current_dir, '.yacbi.db')):
+        if os.path.isdir(os.path.join(current_dir, '.yacbi')):
             return current_dir
         new_dir = os.path.dirname(current_dir)
         if new_dir == current_dir:
@@ -306,7 +306,10 @@ def _connect_to_db(root):
     Arguments:
     root -- Yacbi project root
     """
-    dbfile = os.path.join(root, '.yacbi.db')
+    yacbi_dir = os.path.join(root, ".yacbi")
+    if not os.path.isdir(yacbi_dir):
+        os.mkdir(yacbi_dir)
+    dbfile = os.path.join(yacbi_dir, 'index.db')
     conn = sqlite3.connect(
         dbfile,
         detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
@@ -534,7 +537,7 @@ _Config = collections.namedtuple(
 
 
 def _read_config(root):
-    config_path = os.path.join(root, '.yacbi.json')
+    config_path = os.path.join(root, ".yacbi", "config.json")
     js = {}
     if os.path.isfile(config_path):
         with open(config_path, 'r') as config_fd:
