@@ -639,14 +639,17 @@ class _FileManager(object):
         comp_db_paths = self.comp_db.get_all_files()
         src_paths = set()
         inc_paths = set()
+        removed_paths = set()
         for f in files:
-            if f.is_included:
+            if not os.path.exists(f.path):
+                removed_paths.add(f.path)
+            elif f.is_included:
                 inc_paths.add(f.path)
             else:
                 src_paths.add(f.path)
         paths_to_remove = src_paths - comp_db_paths
         self.sources_to_add = comp_db_paths - src_paths
-        removed_paths = self._remove_files(paths_to_remove)
+        removed_paths.update(self._remove_files(paths_to_remove))
         self.sources_to_update = set()
         self.headers_to_update = set()
         for f in files:
