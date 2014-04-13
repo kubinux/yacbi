@@ -20,6 +20,7 @@ import collections
 import itertools
 import json
 import logging
+import fnmatch
 import os
 import sqlite3
 
@@ -533,7 +534,7 @@ def query_including_files(root, included_file):
 
 
 _Config = collections.namedtuple(
-    '_Config', ['extra_args', 'banned_args', 'overrides'])
+    '_Config', ['extra_args', 'banned_args', 'overrides', 'inline_files'])
 
 
 def _read_config(root):
@@ -542,9 +543,12 @@ def _read_config(root):
     if os.path.isfile(config_path):
         with open(config_path, 'r') as config_fd:
             js = json.load(config_fd)
+    inline_files = set([_make_absolute_path(root, inl)
+                        for inl in js.get('inline_files', [])])
     return _Config(js.get('extra_args', []),
                    js.get('banned_args', []),
-                   js.get('overrides', []))
+                   js.get('overrides', []),
+                   inline_files)
 
 
 def create_or_update(root):
@@ -554,7 +558,10 @@ def create_or_update(root):
         config.extra_args,
         config.banned_args)
     with _connect_to_db(root) as conn:
-        file_manager = _FileManager(root, conn, compilation_db)
+        file_manager = _FileManager(root,
+                                    conn,
+                                    compilation_db,
+                                    config.inline_files)
         for cmd in file_manager:
             logger.info("indexing %s", cmd.filename)
             indexer = Indexer(file_manager, cmd)
@@ -632,44 +639,55 @@ class _FileManager(object):
         def get_mtime(self):
             return datetime.datetime.fromtimestamp(os.path.getmtime(self.path))
 
-    def __init__(self, root, conn, comp_db):
+    def __init__(self, root, conn, comp_db, inlines):
         self.root = root + os.path.sep
         self.conn = conn
         self.comp_db = comp_db
+        self.inlines = inlines
         self.visited = set()
         self.now = datetime.datetime.now()
         files = self._query_existing_files()
         comp_db_paths = self.comp_db.get_all_files()
         src_paths = set()
-        inc_paths = set()
         removed_paths = set()
         for f in files:
             if not os.path.exists(f.path):
                 removed_paths.add(f.path)
-            elif f.is_included:
-                inc_paths.add(f.path)
-            else:
+            elif not f.is_included:
                 src_paths.add(f.path)
         paths_to_remove = src_paths - comp_db_paths
         self.sources_to_add = comp_db_paths - src_paths
         removed_paths.update(self._remove_files(paths_to_remove))
         self.sources_to_update = set()
         self.headers_to_update = set()
+        self.inlines_to_update = set()
         for f in files:
             if f.path not in removed_paths:
                 if f.needs_update():
                     if f.is_included:
-                        self.headers_to_update.add(f.path)
+                        if self._is_inline(f.path):
+                            self.inlines_to_update.add(f.path)
+                        else:
+                            self.headers_to_update.add(f.path)
                     else:
                         self.sources_to_update.add(f.path)
                 else:
                     self.visited.add(f.path)
 
+    def _is_inline(self, path):
+        for pattern in self.inlines:
+            if fnmatch.fnmatchcase(path, pattern):
+                return True
+        return False
+
     def should_index(self, path):
         if path in self.visited:
             return False
         self.visited.add(path)
-        if path in self.headers_to_update:
+        if path in self.inlines_to_update:
+            self.inlines_to_update.remove(path)
+            return True
+        elif path in self.headers_to_update:
             self.headers_to_update.remove(path)
             return True
         elif path in self.sources_to_add or path in self.sources_to_update:
@@ -824,6 +842,12 @@ class _FileManager(object):
             self.visited.add(path)
             return self._query_compile_command(path)
         else:
+            while self.inlines_to_update:
+                inline_path = self.inlines_to_update.pop()
+                path = self._query_including_file(inline_path)
+                if path:
+                    self.visited.add(path)
+                    return self._query_compile_command(path)
             raise StopIteration
 
     def _query_existing_files(self):
@@ -836,6 +860,34 @@ class _FileManager(object):
                     FROM files
                     ORDER BY path""")
         return [self.File(*tup) for tup in cur.fetchall()]
+
+    def _query_including_file(self, path):
+        cur = self.conn.cursor()
+        cur.execute("""
+                    SELECT
+                      id
+                    FROM files
+                    WHERE path = ?""",
+                    (path,))
+        included_file_id = cur.fetchone()
+        if not included_file_id:
+            return None
+        cur.execute("""
+                    SELECT
+                      f.path
+                    FROM includes i
+                    LEFT OUTER JOIN files f ON (i.including_file_id = f.id)
+                    WHERE
+                      i.included_file_id = ?
+                    ORDER BY
+                      f.last_update DESC,
+                      f.id ASC
+                    LIMIT 1""",
+                    included_file_id)
+        including_file_path = cur.fetchone()
+        if not including_file_path:
+            return None
+        return including_file_path[0]
 
     def _query_compile_command(self, path):
         cur = self.conn.cursor()
