@@ -1,0 +1,92 @@
+#!python
+
+"""
+yacbi - Yet Another Clang-Based Indexer.
+
+Copyright (C) 2014 Jakub Lewandowski <jakub.lewandowski@gmail.com>
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+"""
+import argparse
+import logging
+import os
+import sys
+
+import yacbi
+
+
+def init(args):
+    yacbi.create_or_update(os.getcwd())
+
+
+def update(args):
+    yacbi.create_or_update(os.getcwd())
+
+
+def config(args):
+    raise NotImplementedError("config")
+
+
+def setup_verbosity_args(parser):
+    verbosity_group = parser.add_mutually_exclusive_group()
+    verbosity_group.add_argument("-v", "--verbose", action="store_true")
+    verbosity_group.add_argument("-d", "--debug", action="store_true")
+
+
+def setup_init_args(subparsers):
+    init_parser = subparsers.add_parser("init", help="initialize the index")
+    init_parser.set_defaults(callback=init)
+
+
+def setup_update_args(subparsers):
+    update_parser = subparsers.add_parser("update", help="update the index")
+    update_parser.set_defaults(callback=update)
+
+
+def setup_config_args(subparsers):
+    config_parser = subparsers.add_parser("config",
+                                          help="view/alter the configuration")
+    config_parser.set_defaults(callback=config)
+
+
+def process_arguments():
+    parser = argparse.ArgumentParser()
+    setup_verbosity_args(parser)
+    subparsers = parser.add_subparsers(dest="command", help="commands")
+    setup_init_args(subparsers)
+    setup_update_args(subparsers)
+    setup_config_args(subparsers)
+    return parser.parse_args()
+
+
+def setup_logging(args):
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+    log_level = logging.ERROR
+    if args.verbose:
+        log_level = logging.INFO
+    elif args.debug:
+        log_level = logging.DEBUG
+    yacbi.logger.addHandler(stderr_handler)
+    yacbi.logger.setLevel(log_level)
+
+
+def main():
+    args = process_arguments()
+    setup_logging(args)
+    args.callback(args)
+
+
+if __name__ == '__main__':
+    main()
