@@ -32,13 +32,14 @@ __all__ = [
     'logger',
     'SourceLocation',
     'Reference',
+    'initialize_project',
+    'update',
     'get_root_for_path',
     'query_compile_args',
     'query_definitions',
     'query_references',
     'query_subtypes',
     'query_including_files',
-    'create_or_update',
     ]
 
 
@@ -299,18 +300,13 @@ def get_root_for_path(path):
         current_dir = new_dir
 
 
-def _connect_to_db(root):
-    """Return a connection to a Yacbi database.
-
-    If the database does not exist, it is created and initialized.
+def _init_db(root):
+    """Initialize a Yacbi database.
 
     Arguments:
     root -- Yacbi project root
     """
-    yacbi_dir = os.path.join(root, ".yacbi")
-    if not os.path.isdir(yacbi_dir):
-        os.mkdir(yacbi_dir)
-    dbfile = os.path.join(yacbi_dir, 'index.db')
+    dbfile = os.path.join(root, ".yacbi", "index.db")
     conn = sqlite3.connect(
         dbfile,
         detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
@@ -366,7 +362,32 @@ def _connect_to_db(root):
     );
     """)
     conn.commit()
+
+
+def _connect_to_db(root):
+    """Return a connection to the existing Yacbi database.
+
+    Arguments:
+    root -- Yacbi project root
+    """
+    dbfile = os.path.join(root, ".yacbi", "index.db")
+    if not os.path.isfile(dbfile):
+        raise RuntimeError("no such file: {0}".format(dbfile))
+    conn = sqlite3.connect(
+        dbfile,
+        detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
     return conn
+
+
+def initialize_project(root):
+    yacbi_dir = os.path.join(root, ".yacbi")
+    if os.path.exists(yacbi_dir):
+        if not os.path.isdir(yacbi_dir):
+            raise RuntimeError(
+                "{0} exists but is not a directory".format(yacbi_dir))
+    else:
+        os.makedirs(yacbi_dir)
+    _init_db(root)
 
 
 def query_compile_args(root, filename):
@@ -551,7 +572,7 @@ def _read_config(root):
                    inline_files)
 
 
-def create_or_update(root):
+def update(root):
     config = _read_config(root)
     compilation_db = _CompilationDatabase(
         root,

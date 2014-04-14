@@ -27,15 +27,11 @@ import yacbi
 
 
 def init(args):
-    yacbi.create_or_update(os.getcwd())
+    yacbi.initialize_project(args.root)
 
 
 def update(args):
-    yacbi.create_or_update(os.getcwd())
-
-
-def config(args):
-    raise NotImplementedError("config")
+    yacbi.update(args.root)
 
 
 def setup_verbosity_args(parser):
@@ -46,28 +42,27 @@ def setup_verbosity_args(parser):
 
 def setup_init_args(subparsers):
     init_parser = subparsers.add_parser("init", help="initialize the index")
+    init_parser.add_argument("--root",
+                             help="project root (default is CWD)",
+                             default=os.getcwd())
     init_parser.set_defaults(callback=init)
 
 
 def setup_update_args(subparsers):
     update_parser = subparsers.add_parser("update", help="update the index")
+    update_parser.add_argument("--root",
+                             help="project root (default is CWD)",
+                             default=os.getcwd())
     update_parser.set_defaults(callback=update)
 
 
-def setup_config_args(subparsers):
-    config_parser = subparsers.add_parser("config",
-                                          help="view/alter the configuration")
-    config_parser.set_defaults(callback=config)
-
-
-def process_arguments():
+def create_argument_parser():
     parser = argparse.ArgumentParser()
     setup_verbosity_args(parser)
     subparsers = parser.add_subparsers(dest="command", help="commands")
     setup_init_args(subparsers)
     setup_update_args(subparsers)
-    setup_config_args(subparsers)
-    return parser.parse_args()
+    return parser
 
 
 def setup_logging(args):
@@ -83,10 +78,17 @@ def setup_logging(args):
 
 
 def main():
-    args = process_arguments()
+    arg_parser = create_argument_parser()
+    args = arg_parser.parse_args()
     setup_logging(args)
-    args.callback(args)
+    try:
+        args.callback(args)
+    except Exception, err:
+        print >>sys.stderr, "{0}: error: {1}".format(arg_parser.prog,
+                                                     err.message)
+        return 1
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
