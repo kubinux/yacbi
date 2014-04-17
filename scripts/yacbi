@@ -84,8 +84,7 @@ def main():
     try:
         args.callback(args)
     except Exception, err:
-        print >>sys.stderr, "{0}: error: {1}".format(arg_parser.prog,
-                                                     err.message)
+        print >>sys.stderr, "{0}: error: {1}".format(arg_parser.prog, err)
         return 1
     return 0
 
