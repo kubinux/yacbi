@@ -33,7 +33,7 @@ __all__ = [
     'SourceLocation',
     'Reference',
     'initialize_project',
-    'update',
+    'index',
     'get_root_for_path',
     'query_compile_args',
     'query_definitions',
@@ -584,9 +584,9 @@ def _find_ignore_pattern(error_spelling, ignored_errors):
     return None
 
 
-def update(root,
-           stop_on_error=False,
-           rollback_on_error=False):
+def index(root,
+          stop_on_error=False,
+          rollback_on_error=False):
     config = _read_config(root)
     compilation_db = _CompilationDatabase(
         root,

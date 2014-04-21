@@ -30,7 +30,7 @@ def init(args):
     yacbi.initialize_project(args.root)
 
 
-def update(args):
+def index(args):
     stop_on_error = False
     rollback_on_error = False
     if args.rollback_on_error:
@@ -38,9 +38,9 @@ def update(args):
         rollback_on_error = True
     elif args.stop_on_error:
         stop_on_error = True
-    yacbi.update(args.root,
-                 stop_on_error,
-                 rollback_on_error)
+    yacbi.index(args.root,
+                stop_on_error,
+                rollback_on_error)
 
 
 def setup_verbosity_args(parser):
@@ -57,13 +57,13 @@ def setup_init_args(subparsers):
     init_parser.set_defaults(callback=init)
 
 
-def setup_update_args(subparsers):
-    update_parser = subparsers.add_parser("update", help="update the index")
-    update_parser.add_argument(
+def setup_index_args(subparsers):
+    index_parser = subparsers.add_parser("index", help="update the index")
+    index_parser.add_argument(
         "--root",
         help="project root (default is CWD)",
         default=os.getcwd())
-    on_error_group = update_parser.add_mutually_exclusive_group()
+    on_error_group = index_parser.add_mutually_exclusive_group()
     on_error_group.add_argument(
         "--stop-on-error",
         help="stop when error occurs",
@@ -72,7 +72,7 @@ def setup_update_args(subparsers):
         "--rollback-on-error",
         help="rollback the transaction when an error occurs",
         action="store_true")
-    update_parser.set_defaults(callback=update)
+    index_parser.set_defaults(callback=index)
 
 
 def create_argument_parser():
@@ -80,7 +80,7 @@ def create_argument_parser():
     setup_verbosity_args(parser)
     subparsers = parser.add_subparsers(dest="command", help="commands")
     setup_init_args(subparsers)
-    setup_update_args(subparsers)
+    setup_index_args(subparsers)
     return parser
 
 
