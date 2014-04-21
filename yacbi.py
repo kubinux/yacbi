@@ -16,16 +16,16 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 """
+import clang.cindex
 import collections
+import datetime
+import fnmatch
 import itertools
 import json
 import logging
-import fnmatch
 import os
+import re
 import sqlite3
-
-import clang.cindex
-import datetime
 
 
 __all__ = [
@@ -213,7 +213,7 @@ def _make_compile_args(cwd, args, extra_args, banned_args):
     itr = itertools.chain(args, extra_args)
     arg = next(itr, None)
     while arg is not None:
-        if not arg in banned_args:
+        if arg not in banned_args:
             if arg in ('-nostdinc',) or arg.startswith(('-D', '-W', '-std=')):
                 all_args.append(arg)
             elif arg == '-x':
@@ -554,8 +554,12 @@ def query_including_files(root, included_file):
         return [SourceLocation(*t) for t in cur.fetchall()]
 
 
-_Config = collections.namedtuple(
-    '_Config', ['extra_args', 'banned_args', 'overrides', 'inline_files'])
+_Config = collections.namedtuple('_Config',
+                                 ['extra_args',
+                                  'banned_args',
+                                  'overrides',
+                                  'inline_files',
+                                  'ignored_errors'])
 
 
 def _read_config(root):
@@ -569,10 +573,20 @@ def _read_config(root):
     return _Config(js.get('extra_args', []),
                    js.get('banned_args', []),
                    js.get('overrides', []),
-                   inline_files)
+                   inline_files,
+                   js.get('ignored_errors', []))
 
 
-def update(root):
+def _find_ignore_pattern(error_spelling, ignored_errors):
+    for pattern in ignored_errors:
+        if re.search(pattern, error_spelling):
+            return pattern
+    return None
+
+
+def update(root,
+           stop_on_error=False,
+           rollback_on_error=False):
     config = _read_config(root)
     compilation_db = _CompilationDatabase(
         root,
@@ -587,14 +601,27 @@ def update(root):
             logger.info("indexing %s", cmd.filename)
             indexer = Indexer(file_manager, cmd)
             indexer.index()
-            if logger.isEnabledFor(logging.ERROR):
-                for e in indexer.errors:
-                    logger.error("%s:%d:%d: %s",
-                                 e.location.filename,
-                                 e.location.line,
-                                 e.location.column,
-                                 e.spelling)
-            file_manager.save_indices(indexer.idx_by_path.values())
+            relevant_errors = []
+            for e in indexer.errors:
+                logger.error("%s:%d:%d: %s",
+                             e.location.filename,
+                             e.location.line,
+                             e.location.column,
+                             e.spelling)
+                ignore_pattern = _find_ignore_pattern(e.spelling,
+                                                      config.ignored_errors)
+                if ignore_pattern:
+                    logger.info('ignoring error: "%s" due to "%s"',
+                                e.spelling,
+                                ignore_pattern)
+                else:
+                    relevant_errors.append(e)
+            if not relevant_errors:
+                file_manager.save_indices(indexer.idx_by_path.values())
+            elif stop_on_error:
+                if not rollback_on_error:
+                    conn.commit()
+                raise RuntimeError("stopping due to: {0}".format(e.spelling))
         file_manager.remove_orphaned_includes()
         conn.commit()
 
@@ -810,7 +837,12 @@ class _FileManager(object):
                   kind,
                   is_definition)
                 VALUES (?, ?, ?, ?, ?, ?)""",
-                [(symbol_id, file_id, l.line, l.column, r.kind, r.is_definition)
+                [(symbol_id,
+                  file_id,
+                  l.line,
+                  l.column,
+                  r.kind,
+                  r.is_definition)
                  for l, r in refs.iteritems()])
 
     def _save_includes(self, idx):

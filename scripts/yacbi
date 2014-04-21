@@ -31,7 +31,16 @@ def init(args):
 
 
 def update(args):
-    yacbi.update(args.root)
+    stop_on_error = False
+    rollback_on_error = False
+    if args.rollback_on_error:
+        stop_on_error = True
+        rollback_on_error = True
+    elif args.stop_on_error:
+        stop_on_error = True
+    yacbi.update(args.root,
+                 stop_on_error,
+                 rollback_on_error)
 
 
 def setup_verbosity_args(parser):
@@ -50,9 +59,19 @@ def setup_init_args(subparsers):
 
 def setup_update_args(subparsers):
     update_parser = subparsers.add_parser("update", help="update the index")
-    update_parser.add_argument("--root",
-                             help="project root (default is CWD)",
-                             default=os.getcwd())
+    update_parser.add_argument(
+        "--root",
+        help="project root (default is CWD)",
+        default=os.getcwd())
+    on_error_group = update_parser.add_mutually_exclusive_group()
+    on_error_group.add_argument(
+        "--stop-on-error",
+        help="stop when error occurs",
+        action="store_true")
+    on_error_group.add_argument(
+        "--rollback-on-error",
+        help="rollback the transaction when an error occurs",
+        action="store_true")
     update_parser.set_defaults(callback=update)
 
 
