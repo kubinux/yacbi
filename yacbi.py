@@ -600,7 +600,15 @@ def index(root,
         for cmd in file_manager:
             logger.info("indexing %s", cmd.filename)
             indexer = Indexer(file_manager, cmd)
-            indexer.index()
+            try:
+                indexer.index()
+            except Exception, e:
+                logger.error("%s: %s", cmd.filename, e)
+                if stop_on_error:
+                    if not rollback_on_error:
+                        conn.commit()
+                    raise RuntimeError("stopping due to: {0}".format(e))
+                continue
             relevant_errors = []
             for e in indexer.errors:
                 logger.error("%s:%d:%d: %s",
@@ -700,11 +708,19 @@ class _FileManager(object):
         removed_paths = set()
         for f in files:
             if not os.path.exists(f.path):
+                logger.warning("%s: file not found", f.path)
+                self._remove_non_existent_file(f.path)
                 removed_paths.add(f.path)
             elif not f.is_included:
                 src_paths.add(f.path)
         paths_to_remove = src_paths - comp_db_paths
-        self.sources_to_add = comp_db_paths - src_paths
+        sources_to_add = comp_db_paths - src_paths
+        self.sources_to_add = set()
+        for f in sources_to_add:
+            if os.path.exists(f):
+                self.sources_to_add.add(f)
+            else:
+                logger.warning("%s: file not found", f)
         removed_paths.update(self._remove_files(paths_to_remove))
         self.sources_to_update = set()
         self.headers_to_update = set()
@@ -987,6 +1003,14 @@ class _FileManager(object):
                 cur.execute("DELETE FROM files WHERE id = ?", file_id)
                 removed.add(path)
         return removed
+
+    def _remove_non_existent_file(self, path):
+        cur = self.conn.cursor()
+        cur.execute("SELECT id FROM files WHERE path = ? LIMIT 1",
+                    (path,))
+        file_id = cur.fetchone()
+        if file_id:
+            cur.execute("DELETE FROM files WHERE id = ?", file_id)
 
 
 class Indexer(object):
